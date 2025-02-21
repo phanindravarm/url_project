@@ -30,16 +30,16 @@ app.get("/url", async (req, res) => {
     res.status(500).send("Error while sending");
   }
 });
-app.post("/url/:input", async (req, res) => {
-  const hey = req.params.input;
+app.post("/url", async (req, res) => {
+  const { url } = req.body;
   try {
     const result = await client.query(
       "INSERT INTO url_tb (url) VALUES($1) RETURNING *",
-      [hey]
+      [url]
     );
     res.status(200).json(result.rows[0]);
   } catch (error) {
-    console.error("Error adding URL");
+    console.error("Error adding URL:", error);
     res.status(500).send("Error inserting URL into database");
   }
 });

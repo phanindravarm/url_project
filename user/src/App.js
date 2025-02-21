@@ -58,11 +58,16 @@ function App() {
   }
 
   function addItem(url) {
-    fetch(`http://localhost:3000/url/${url}`, {
+    fetch(`http://localhost:3000/url`, {
       method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ url }),
     })
       .then((response) => response.json())
       .then((data) => {
+        console.log(data);
         setUrls((prevUrls) => [...prevUrls, data]);
       })
       .catch((error) => console.error("Error:", error));
