@@ -1,4 +1,4 @@
-import express, { query } from "express";
+import express from "express";
 import { createServer } from "node:http";
 import cors from "cors";
 import pkg from "pg";
@@ -21,6 +21,73 @@ client
 app.use(cors());
 app.use(express.json());
 app.use(express.text());
+async function getOrInsertCategory(categoryName) {
+  const categoryResult = await client.query(
+    "SELECT id FROM categories_tb WHERE category=$1",
+    [categoryName]
+  );
+
+  if (categoryResult.rowCount > 0) {
+    return categoryResult.rows[0].id;
+  } else {
+    const newCategory = await client.query(
+      "INSERT INTO categories_tb (category) VALUES($1) RETURNING id",
+      [categoryName]
+    );
+    return newCategory.rows[0].id;
+  }
+}
+
+async function insertOrUpdateUrlWithCategories(urlId, categories) {
+  await client.query("DELETE FROM url_categories_tb WHERE url_id = $1", [
+    urlId,
+  ]);
+  for (const category of categories) {
+    const categoryId = await getOrInsertCategory(category);
+    await client.query(
+      "INSERT INTO url_categories_tb (url_id, category_id) VALUES($1, $2)",
+      [urlId, categoryId]
+    );
+  }
+}
+
+async function getCombinedUrlData(urlId) {
+  const combined_res = await client.query(
+    `
+    SELECT url_tb.*, categories_tb.category
+    FROM url_tb
+    INNER JOIN url_categories_tb ON url_tb.id = url_categories_tb.url_id
+    INNER JOIN categories_tb ON categories_tb.id = url_categories_tb.category_id
+    WHERE url_categories_tb.url_id = $1;
+    `,
+    [urlId]
+  );
+
+  let mapArray = new Map();
+  combined_res.rows.forEach((value) => {
+    if (mapArray.has(value.id)) {
+      mapArray.get(value.id).category.push(value.category);
+    } else {
+      mapArray.set(value.id, { ...value, category: [value.category] });
+    }
+  });
+  return Array.from(mapArray.values())[0];
+}
+
+function combineUrlAndCategoryData(rows) {
+  let mapArray = new Map();
+
+  rows.forEach((value) => {
+    if (mapArray.has(value.id)) {
+      mapArray.get(value.id).category.push(value.category);
+    } else {
+      mapArray.set(value.id, { ...value, category: [value.category] });
+    }
+  });
+
+  return Array.from(mapArray.values());
+}
+
 app.get("/", async (req, res) => {
   try {
     const categoryResult = await client.query("SELECT * FROM categories_tb");
@@ -30,15 +97,7 @@ app.get("/", async (req, res) => {
       INNER JOIN url_categories_tb ON url_tb.id = url_categories_tb.url_id
       INNER JOIN categories_tb ON categories_tb.id = url_categories_tb.category_id`
     );
-    let combinedArray = [];
-    combined_res.rows.forEach((value) => {
-      const present = combinedArray.find((i) => i.id === value.id);
-      if (present) {
-        present.category.push(value.category);
-      } else {
-        combinedArray.push({ ...value, category: [value.category] });
-      }
-    });
+    const combinedArray = combineUrlAndCategoryData(combined_res.rows);
     const data = {
       catRes: categoryResult.rows,
       combinedArray: combinedArray,
@@ -49,6 +108,7 @@ app.get("/", async (req, res) => {
     res.status(500).send("Error while sending data");
   }
 });
+
 app.post("/url", async (req, res) => {
   const { url, category } = req.body;
   const categories = Array.isArray(category) ? category : [category];
@@ -59,53 +119,13 @@ app.post("/url", async (req, res) => {
       [url]
     );
     const urlId = urlResult.rows[0].id;
-    for (const cat of categories) {
-      const categoryResult = await client.query(
-        "SELECT id FROM categories_tb WHERE category = $1",
-        [cat]
-      );
+    await insertOrUpdateUrlWithCategories(urlId, categories);
 
-      let categoryId;
-      if (categoryResult.rows.length > 0) {
-        categoryId = categoryResult.rows[0].id;
-      } else {
-        const newCategoryResult = await client.query(
-          "INSERT INTO categories_tb (category) VALUES($1) RETURNING id",
-          [cat]
-        );
-        categoryId = newCategoryResult.rows[0].id;
-      }
-      await client.query(
-        "INSERT INTO url_categories_tb (url_id, category_id) VALUES($1, $2)",
-        [urlId, categoryId]
-      );
-    }
-    const hey = await client.query(
-      `
-      SELECT url_tb.*, categories_tb.category
-      FROM url_tb
-      INNER JOIN url_categories_tb ON url_categories_tb.url_id = url_tb.id
-      INNER JOIN categories_tb ON categories_tb.id = url_categories_tb.category_id
-      WHERE url_categories_tb.url_id = $1;
-      `,
-      [urlId]
-    );
-    let combinedArray = [];
-    hey.rows.forEach((value) => {
-      const present = combinedArray.find((i) => i.id === value.id);
-      if (present) {
-        present.category.push(value.category);
-      } else {
-        combinedArray.push({ ...value, category: [value.category] });
-      }
+    const combinedData = await getCombinedUrlData(urlId);
+    res.status(200).json({
+      combinedArray: combinedData,
+      categories,
     });
-    const data = {
-      combinedArray: combinedArray[0],
-      hey: hey.rows,
-      url: urlResult.rows[0],
-      categories: categories,
-    };
-    res.status(200).json(data);
   } catch (error) {
     console.error("Error adding URL:", error);
     res.status(500).send("Error inserting URL into database");
@@ -135,34 +155,12 @@ app.post("/edit/:index", async (req, res) => {
       "UPDATE url_tb SET url=$1 WHERE id=$2 RETURNING *",
       [url, index]
     );
-    await client.query("DELETE FROM url_categories_tb WHERE url_id = $1", [
-      index,
-    ]);
-    for (const cat of categories) {
-      const categoryResult = await client.query(
-        "SELECT id FROM categories_tb WHERE category = $1",
-        [cat]
-      );
 
-      let categoryId;
-      if (categoryResult.rows.length > 0) {
-        categoryId = categoryResult.rows[0].id;
-      } else {
-        const newCategoryResult = await client.query(
-          "INSERT INTO categories_tb (category) VALUES($1) RETURNING id",
-          [cat]
-        );
-        categoryId = newCategoryResult.rows[0].id;
-      }
-      await client.query(
-        "INSERT INTO url_categories_tb (url_id, category_id) VALUES($1, $2)",
-        [index, categoryId]
-      );
-    }
-    console.log(result.rows);
     if (result.rowCount > 0) {
+      await insertOrUpdateUrlWithCategories(index, categories);
+      const updatedData = await getCombinedUrlData(index);
       res.status(200).json({
-        updated: result.rows[0],
+        updated: updatedData,
       });
     } else {
       res.status(404).send("URL not found");
